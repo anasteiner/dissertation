@@ -1,0 +1,1002 @@
+```{r}
+# Load necessary libraries
+library(spdep)
+library(dplyr)
+library(tidyr)
+library(readr)
+```
+
+```{r}
+# Read the datasets
+census_data <- read_csv("C:/Users/USUARIO/Documents/UCL/Dissertation/v3 longitudinal diaspora study/Code/census_data.csv")
+housing_data <- read_csv("C:/Users/USUARIO/Documents/UCL/Dissertation/v3 longitudinal diaspora study/Code/ffinal_housing_cleaned.csv")
+neighborhood_data <- read_csv("C:/Users/USUARIO/Documents/UCL/Dissertation/v3 longitudinal diaspora study/Code/neighborhood_data.csv")
+msoa_geometry <- st_read("C:/Users/USUARIO/Documents/UCL/Dissertation/v3 longitudinal diaspora study/Data/MSOA_2011_London_gen_MHW.shp")
+```
+
+```{r}
+# Perform the join 
+combined_data <- neighborhood_data %>%
+  left_join(housing_data, by = c("MSOA11CD", "Year", "MSOA11NM"))
+
+library(tidyr)
+
+# Pivot census_data to wide format, separating columns by Nationality
+census_data_wide <- census_data %>%
+  pivot_wider(
+    names_from = Nationality, 
+    values_from = c(Proportion, Dissimilarity_Index, cumulative_dissimilarity, H, Isolation_Index)
+  )
+
+# Perform the join 
+final_data <- combined_data %>%
+  left_join(census_data_wide, by = c("MSOA11CD", "Year", "MSOA11NM"))
+```
+
+```{r}
+# Join with spatial data
+final_data_sf <- final_data %>%
+  left_join(msoa_geometry, by = c("MSOA11CD", "MSOA11NM"))
+
+# Convert to sf object
+final_data_sf <- st_as_sf(final_data_sf)
+```
+
+```{r}
+# Clean rows and columns
+
+# Print all column names of final_data_sf
+print(colnames(final_data_sf))
+
+# Drop columns by index
+final_data_sf <- final_data_sf[, -c(17, 24, 31, 38, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55)]
+
+# Remove rows with any NA values
+final_data_sf <- na.omit(final_data_sf)
+```
+
+```{r}
+# Verify if the data is already an sf object
+if (inherits(final_data_sf, "sf")) {
+  final_data_sf_sf <- final_data_sf
+} else {
+  # Check if the geometry column is in a format that can be converted to sf
+  if ("geometry" %in% colnames(final_data_sf)) {
+    if (inherits(final_data_sf$geometry, "sfc_MULTIPOLYGON")) {
+      final_data_sf_sf <- st_as_sf(final_data_sfa)
+    } else {
+      final_data_sf_sf <- st_as_sf(final_data_sf, wkt = "geometry", crs = 27700)
+    }
+  } else {
+    stop("The geometry column is not in a recognizable format.")
+  }
+}
+```
+
+```{r}
+# Convert Religion to dummy variables
+library(dplyr)
+final_data_sf_sf <- final_data_sf_sf %>%
+  mutate_at(vars(Religion), ~as.factor(.)) %>%
+  mutate(Religion_Christian = ifelse(Religion == "Christian", 1, 0),
+         Religion_Hindu = ifelse(Religion == "Hindu", 1, 0),
+         Religion_Jewish = ifelse(Religion == "Jewish", 1, 0),
+         Religion_Muslim = ifelse(Religion == "Muslim", 1, 0),
+         Religion_NoReligion = ifelse(Religion == "No religion", 1, 0),
+         Religion_Sikh = ifelse(Religion == "Sikh", 1, 0))
+```
+
+## Question 2: How have housing conditions influenced settlement patterns over time and space?
+
+## CCF
+
+```{r}
+library(ggplot2)
+# CCF for selected nationalities and indices over selected years
+ccf_results <- list()
+
+years <- c(2001, 2005, 2011, 2015, 2021)
+indices <- c("Dissimilarity_Index", "cumulative_dissimilarity", "H", "Isolation_Index")
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+
+# Run CCF and save results
+for (year in years) {
+  for (nationality in nationalities) {
+    for (index in indices) {
+      col_name <- paste(index, nationality, sep = "_")
+      subset_data <- subset(final_data_sf_sf, Year == year)
+      ccf_result <- ccf(subset_data$HousingIndex, subset_data[[col_name]], plot = FALSE)
+      ccf_results[[paste(index, nationality, year, sep = "_")]] <- ccf_result
+      plot(ccf_result, main = paste("CCF: Housing Index and", col_name, "in", year))
+      ggsave(filename = paste0("CCF_Housing_", col_name, "_", year, ".png"))
+    }
+  }
+}
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(gridExtra)
+
+# Plot CCF results for each year and nationality
+years <- c(2001, 2005, 2011, 2015, 2021)
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+
+# Plot CCF results for each year, nationality, and index
+for (year in years) {
+  for (nationality in nationalities) {
+    for (index in indices) {
+      # Extract CCF data from results
+      ccf_result <- ccf_results[[paste(index, nationality, year, sep = "_")]]
+      
+      # Convert the CCF result to a dataframe
+      ccf_data <- data.frame(
+        Lag = as.numeric(ccf_result$lag),  # Ensure Lag is numeric
+        CCF = as.numeric(ccf_result$acf)  # Ensure CCF is numeric
+      )
+      
+      # Plot the CCF
+      p <- ggplot(ccf_data, aes(x = Lag, y = CCF)) +
+        geom_line() +
+        geom_point() +
+        labs(title = paste("CCF between Housing Index and", index, "for", nationality, "in", year),
+             x = "Lag", y = "CCF") +
+        theme_minimal()
+      
+      # Save the plot
+      ggsave(filename = paste0("CCF_Plots/CCF_", index, "_", nationality, "_", year, ".png"), plot = p, width = 8, height = 6)
+    }
+  }
+}
+```
+
+
+```{r}
+# General Linear Regression for selected nationalities and indices
+for (nationality in nationalities) {
+  for (index in indices) {
+    col_name <- paste(index, nationality, sep = "_")
+    model <- lm(as.formula(paste(col_name, "~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + 
+                                  Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + 
+                                  Religion_NoReligion + Religion_Sikh")), data = final_data_sf_sf)
+    cat("Summary for", col_name, "\n")
+    print(summary(model))
+  }
+}
+```
+
+```{r}
+# Annual Linear Regression for selected years and indices
+for (year in years) {
+  for (nationality in nationalities) {
+    for (index in indices) {
+      col_name <- paste(index, nationality, sep = "_")
+      model <- lm(as.formula(paste(col_name, "~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + 
+                                    Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + 
+                                    Religion_NoReligion + Religion_Sikh")), data = subset(final_data_sf_sf, Year == year))
+      cat("Year:", year, " - Summary for", col_name, "\n")
+      print(summary(model))
+    }
+  }
+}
+```
+```{r}
+# Store linear regression results for general and annual models
+lm_results_general <- list()
+lm_results_annual <- list()
+
+# Run general linear regression for each nationality
+for (nationality in nationalities) {
+  formula <- as.formula(paste0("Dissimilarity_Index_", nationality, " ~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh"))
+  lm_results_general[[nationality]] <- lm(formula, data = final_data_sf_sf)
+}
+
+# Run annual linear regression for each nationality and year
+for (year in years) {
+  for (nationality in nationalities) {
+    formula <- as.formula(paste0("Dissimilarity_Index_", nationality, " ~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh"))
+    lm_results_annual[[paste(nationality, year, sep = "_")]] <- lm(formula, data = subset(final_data_sf_sf, Year == year))
+  }
+}
+
+```
+
+```{r}
+# Load required libraries
+library(ggplot2)
+library(gridExtra)
+
+# Visualization of General and Annual Linear Regression Results
+for (nationality in nationalities) {
+  # Extract the coefficients from the general model summary
+  general_model <- lm_results_general[[nationality]]
+  
+  # Convert the coefficients to a dataframe
+  coef_df <- as.data.frame(summary(general_model)$coefficients)
+  coef_df$Variable <- rownames(coef_df)
+  
+  # Plot the coefficients
+  p <- ggplot(coef_df, aes(x = Variable, y = Estimate)) +
+    geom_bar(stat = "identity", fill = "steelblue") +
+    geom_errorbar(aes(ymin = Estimate - `Std. Error`, ymax = Estimate + `Std. Error`), width = 0.2) +
+    labs(title = paste("General Linear Regression Coefficients for", nationality),
+         x = "Variables", y = "Coefficient Estimate") +
+    theme_minimal() +
+    coord_flip()  # Flip for better readability
+  
+  # Save the plot
+  ggsave(filename = paste0("Linear_Reg_Plots/General_Linear_Reg_", nationality, ".png"), plot = p, width = 8, height = 6)
+}
+
+# Annual Linear Regression Visualization
+for (year in years) {
+  for (nationality in nationalities) {
+    # Extract the coefficients from the annual model summary
+    annual_model <- lm_results_annual[[paste(nationality, year, sep = "_")]]
+    
+    # Convert the coefficients to a dataframe
+    coef_df <- as.data.frame(summary(annual_model)$coefficients)
+    coef_df$Variable <- rownames(coef_df)
+    
+    # Plot the coefficients
+    p <- ggplot(coef_df, aes(x = Variable, y = Estimate)) +
+      geom_bar(stat = "identity", fill = "darkorange") +
+      geom_errorbar(aes(ymin = Estimate - `Std. Error`, ymax = Estimate + `Std. Error`), width = 0.2) +
+      labs(title = paste("Annual Linear Regression Coefficients for", nationality, "in", year),
+           x = "Variables", y = "Coefficient Estimate") +
+      theme_minimal() +
+      coord_flip()  # Flip for better readability
+    
+    # Save the plot
+    ggsave(filename = paste0("Linear_Reg_Plots/Annual_Linear_Reg_", nationality, "_", year, ".png"), plot = p, width = 8, height = 6)
+  }
+}
+
+```
+
+```{r}
+install.packages("spgwr")  
+library(spgwr) 
+
+# Ensure the coordinates object has the correct structure
+coords <- st_coordinates(st_centroid(final_data_sf_sf$geometry))
+
+# Repeat coordinates for each year
+coords_expanded <- do.call(rbind, replicate(length(unique(final_data_sf_sf$Year)), coords, simplify = FALSE))
+```
+
+```{r}
+# Nationalities and their corresponding columns
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+dissimilarity_columns <- c("Dissimilarity_Index_Bangladesh", 
+                           "Dissimilarity_Index_Caribbean", 
+                           "Dissimilarity_Index_Poland", 
+                           "Dissimilarity_Index_Romania", 
+                           "Dissimilarity_Index_SEAfrica", 
+                           "Dissimilarity_Index_SouthAmerica")
+cumulative_dissimilarity_columns <- c("cumulative_dissimilarity_Bangladesh", 
+                                      "cumulative_dissimilarity_Caribbean", 
+                                      "cumulative_dissimilarity_Poland", 
+                                      "cumulative_dissimilarity_Romania", 
+                                      "cumulative_dissimilarity_SEAfrica", 
+                                      "cumulative_dissimilarity_SouthAmerica")
+
+# Selected years for analysis
+selected_years <- c(2001, 2005, 2011, 2015, 2021)
+
+library(ggplot2)
+library(dplyr)
+library(sf)
+
+# Create the folder structure
+dir.create("GWR_2", showWarnings = FALSE)
+dir.create("GWR_2/General_Results", showWarnings = FALSE)
+dir.create("GWR_2/Annual_Results", showWarnings = FALSE)
+dir.create("GWR_2/General_Plots", showWarnings = FALSE)
+dir.create("GWR_2/Annual_Plots", showWarnings = FALSE)
+
+# Loop through each nationality
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  
+  # Define the formula for General GWR for Dissimilarity Index
+  formula_gwr_diss <- as.formula(paste0(dissimilarity_columns[i], " ~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                        paste(names(final_data_sf_sf)[grep("^Religion_", names(final_data_sf_sf))], collapse = " + ")))
+  
+  # Define the formula for General GWR for Cumulative Dissimilarity Index
+  formula_gwr_cum_diss <- as.formula(paste0(cumulative_dissimilarity_columns[i], " ~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                            paste(names(final_data_sf_sf)[grep("^Religion_", names(final_data_sf_sf))], collapse = " + ")))
+  
+  # Calculate coordinates for all data
+  coords_all <- st_coordinates(st_centroid(final_data_sf_sf$geometry))
+  
+  # Run General GWR for Dissimilarity Index
+  gwr_result_diss_general <- gwr(formula_gwr_diss, data = final_data_sf_sf, coords = coords_all, adapt = 0.05)
+  results_df_diss_general <- as.data.frame(gwr_result_diss_general$SDF)
+  write.csv(results_df_diss_general, file = paste0("GWR_2/General_Results/GWR_Dissimilarity_", nationality, "_General.csv"), row.names = FALSE)
+  
+  # Plot General GWR results for Dissimilarity Index
+  p_diss_general <- ggplot(results_df_diss_general, aes(x = coords_all[,1], y = coords_all[,2], color = HousingIndex)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_minimal() +
+    labs(title = paste0("General GWR Coefficient for HousingIndex (Dissimilarity - ", nationality, ")"),
+         color = "Coefficient")
+  ggsave(filename = paste0("GWR_2/General_Plots/GWR_HousingIndex_Dissimilarity_", nationality, "_General.png"), plot = p_diss_general, width = 8, height = 6)
+  
+  # Run General GWR for Cumulative Dissimilarity Index
+  gwr_result_cum_diss_general <- gwr(formula_gwr_cum_diss, data = final_data_sf_sf, coords = coords_all, adapt = 0.05)
+  results_df_cum_diss_general <- as.data.frame(gwr_result_cum_diss_general$SDF)
+  write.csv(results_df_cum_diss_general, file = paste0("GWR_2/General_Results/GWR_Cumulative_Dissimilarity_", nationality, "_General.csv"), row.names = FALSE)
+  
+  # Plot General GWR results for Cumulative Dissimilarity Index
+  p_cum_diss_general <- ggplot(results_df_cum_diss_general, aes(x = coords_all[,1], y = coords_all[,2], color = HousingIndex)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_minimal() +
+    labs(title = paste0("General GWR Coefficient for HousingIndex (Cumulative Dissimilarity - ", nationality, ")"),
+         color = "Coefficient")
+  ggsave(filename = paste0("GWR_2/General_Plots/GWR_HousingIndex_Cumulative_Dissimilarity_", nationality, "_General.png"), plot = p_cum_diss_general, width = 8, height = 6)
+  
+  # Loop through each year for annual GWR
+  for (year in selected_years) {
+    # Subset data for the specific year
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # Calculate coordinates based on the subsetted data
+    coords_year <- st_coordinates(st_centroid(data_year$geometry))
+    
+    # Check if data and coords match
+    if (nrow(data_year) == nrow(coords_year)) {
+      # Run GWR for Dissimilarity Index (Annual)
+      gwr_result_diss <- gwr(formula_gwr_diss, data = data_year, coords = coords_year, adapt = 0.05)
+      results_df_diss <- as.data.frame(gwr_result_diss$SDF)
+      write.csv(results_df_diss, file = paste0("GWR_2/Annual_Results/GWR_Dissimilarity_", nationality, "_", year, ".csv"), row.names = FALSE)
+      
+      # Plot GWR results for Dissimilarity Index (Annual)
+      p_diss <- ggplot(results_df_diss, aes(x = coords_year[,1], y = coords_year[,2], color = HousingIndex)) +
+        geom_point() +
+        scale_color_viridis_c() +
+        theme_minimal() +
+        labs(title = paste0("GWR Coefficient for HousingIndex (Dissimilarity - ", nationality, " - ", year, ")"),
+             color = "Coefficient")
+      ggsave(filename = paste0("GWR_2/Annual_Plots/GWR_HousingIndex_Dissimilarity_", nationality, "_", year, ".png"), plot = p_diss, width = 8, height = 6)
+      
+      # Run GWR for Cumulative Dissimilarity Index (Annual)
+      gwr_result_cum_diss <- gwr(formula_gwr_cum_diss, data = data_year, coords = coords_year, adapt = 0.05)
+      results_df_cum_diss <- as.data.frame(gwr_result_cum_diss$SDF)
+      write.csv(results_df_cum_diss, file = paste0("GWR_2/Annual_Results/GWR_Cumulative_Dissimilarity_", nationality, "_", year, ".csv"), row.names = FALSE)
+      
+      # Plot GWR results for Cumulative Dissimilarity Index (Annual)
+      p_cum_diss <- ggplot(results_df_cum_diss, aes(x = coords_year[,1], y = coords_year[,2], color = HousingIndex)) +
+        geom_point() +
+        scale_color_viridis_c() +
+        theme_minimal() +
+        labs(title = paste0("GWR Coefficient for HousingIndex (Cumulative Dissimilarity - ", nationality, " - ", year, ")"),
+             color = "Coefficient")
+      ggsave(filename = paste0("GWR_2/Annual_Plots/GWR_HousingIndex_Cumulative_Dissimilarity_", nationality, "_", year, ".png"), plot = p_cum_diss, width = 8, height = 6)
+    } else {
+      cat("Data and coords do not match for year:", year, "and nationality:", nationality, "\n")
+    }
+  }
+}
+
+```
+
+## Question 3: Are current settlement patterns driven by housing conditions or by historical settlement trends?
+
+```{r}
+# Loop over all nationalities for general and annual linear regression
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- dissimilarity_columns[i]
+  cum_diss_col <- cumulative_dissimilarity_columns[i]
+  
+  # General Linear Regression for Dissimilarity Index
+  model_diss <- lm(as.formula(paste0(diss_col, " ~ ", cum_diss_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + 
+                                     Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                   data = final_data_sf_sf)
+  cat("Summary for", nationality, "(General):\n")
+  print(summary(model_diss))
+  
+  # Plotting general model coefficients
+  coef_df <- as.data.frame(summary(model_diss)$coefficients)
+  coef_df$Variable <- rownames(coef_df)
+  p_gen <- ggplot(coef_df, aes(x = Estimate, y = Variable)) +
+    geom_bar(stat = "identity", fill = "orange") +
+    geom_errorbarh(aes(xmin = Estimate - `Std. Error`, xmax = Estimate + `Std. Error`), height = 0.2) +
+    labs(title = paste("General Linear Regression Coefficients for", nationality), x = "Coefficient Estimate", y = "Variable") +
+    theme_minimal()
+  
+  ggsave(filename = paste0("Linear_Regression_Plots/General_Linear_Reg_", nationality, ".png"), plot = p_gen, width = 8, height = 6)
+  
+  # Annual Linear Regression for Dissimilarity Index
+  for (year in c(2001, 2005, 2011, 2015, 2021)) {
+    model_annual_diss <- lm(as.formula(paste0(diss_col, " ~ ", cum_diss_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + 
+                                              Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                            data = subset(final_data_sf_sf, Year == year))
+    cat("Year:", year, " - Summary for", nationality, "\n")
+    print(summary(model_annual_diss))
+    
+    # Plotting annual model coefficients
+    coef_df_annual <- as.data.frame(summary(model_annual_diss)$coefficients)
+    coef_df_annual$Variable <- rownames(coef_df_annual)
+    p_annual <- ggplot(coef_df_annual, aes(x = Estimate, y = Variable)) +
+      geom_bar(stat = "identity", fill = "orange") +
+      geom_errorbarh(aes(xmin = Estimate - `Std. Error`, xmax = Estimate + `Std. Error`), height = 0.2) +
+      labs(title = paste("Annual Linear Regression Coefficients for", nationality, "in", year), 
+           x = "Coefficient Estimate", y = "Variable") +
+      theme_minimal()
+    
+    ggsave(filename = paste0("Linear_Regression_Plots/Annual_Linear_Reg_", nationality, "_", year, ".png"), plot = p_annual, width = 8, height = 6)
+  }
+}
+```
+
+```{r}
+# Key Years
+key_years <- c(2001, 2005, 2011, 2015, 2021)
+
+# Loop over all nationalities for Model 1 and Model 2 for each key year
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- dissimilarity_columns[i]
+  cum_diss_col <- cumulative_dissimilarity_columns[i]
+  
+  coef_data <- data.frame(Year = integer(), Variable = character(), Estimate = numeric(), Model = character())
+  
+  for (year in key_years) {
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # Model 1: Housing Index as Dependent Variable
+    model_housing <- lm(as.formula(paste0("HousingIndex ~ ", diss_col, " + ", cum_diss_col, " + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                          "Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                        data = data_year)
+    
+    # Store coefficients for plotting
+    coef_housing <- as.data.frame(summary(model_housing)$coefficients)
+    coef_housing$Variable <- rownames(coef_housing)
+    coef_housing$Year <- year
+    coef_housing$Model <- "Housing Index"
+    coef_data <- rbind(coef_data, coef_housing[, c("Year", "Variable", "Estimate", "Model")])
+    
+    # Model 2: Dissimilarity Index as Dependent Variable
+    model_diss2 <- lm(as.formula(paste0(diss_col, " ~ ", cum_diss_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                        "Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                      data = data_year)
+    
+    # Store coefficients for plotting
+    coef_diss2 <- as.data.frame(summary(model_diss2)$coefficients)
+    coef_diss2$Variable <- rownames(coef_diss2)
+    coef_diss2$Year <- year
+    coef_diss2$Model <- "Dissimilarity Index"
+    coef_data <- rbind(coef_data, coef_diss2[, c("Year", "Variable", "Estimate", "Model")])
+  }
+  
+  # Plot comparison of both models across years
+  p <- ggplot(coef_data, aes(x = Year, y = Estimate, color = Model, linetype = Model)) +
+    geom_line(size = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~Variable, scales = "free_y") +
+    labs(title = paste("Comparison of Coefficients for", nationality), 
+         x = "Year", y = "Coefficient Estimate", color = "Model") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  # Save the plot
+  ggsave(filename = paste0("Mutual_Regression_Comparison_Plots/Comparison_", nationality, ".png"), plot = p, width = 10, height = 8)
+}
+```
+
+```{r}
+# Nationalities and their corresponding columns
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+dissimilarity_columns <- c("Dissimilarity_Index_Bangladesh", 
+                           "Dissimilarity_Index_Caribbean", 
+                           "Dissimilarity_Index_Poland", 
+                           "Dissimilarity_Index_Romania", 
+                           "Dissimilarity_Index_SEAfrica", 
+                           "Dissimilarity_Index_SouthAmerica")
+cumulative_dissimilarity_columns <- c("cumulative_dissimilarity_Bangladesh", 
+                                      "cumulative_dissimilarity_Caribbean", 
+                                      "cumulative_dissimilarity_Poland", 
+                                      "cumulative_dissimilarity_Romania", 
+                                      "cumulative_dissimilarity_SEAfrica", 
+                                      "cumulative_dissimilarity_SouthAmerica")
+
+# Key years for analysis
+key_years <- c(2001, 2005, 2011, 2015, 2021)
+
+# Loop over all nationalities for Model 1 and Model 2 for each key year
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- dissimilarity_columns[i]
+  cum_diss_col <- cumulative_dissimilarity_columns[i]
+  
+  coef_data <- data.frame(Year = integer(), Variable = character(), Estimate = numeric(), Model = character())
+  
+  for (year in key_years) {
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # Model 1: Housing Index as Dependent Variable
+    model_housing <- lm(as.formula(paste0("HousingIndex ~ ", diss_col, " + ", cum_diss_col, 
+                                          " + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                        data = data_year)
+    
+    # Store coefficients for plotting
+    coef_housing <- as.data.frame(summary(model_housing)$coefficients)
+    coef_housing$Variable <- rownames(coef_housing)
+    coef_housing$Year <- year
+    coef_housing$Model <- "Housing Index"
+    coef_data <- rbind(coef_data, coef_housing[, c("Year", "Variable", "Estimate", "Model")])
+    
+    # Model 2: Dissimilarity Index as Dependent Variable
+    model_diss2 <- lm(as.formula(paste0(diss_col, " ~ ", cum_diss_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                      data = data_year)
+    
+    # Store coefficients for plotting
+    coef_diss2 <- as.data.frame(summary(model_diss2)$coefficients)
+    coef_diss2$Variable <- rownames(coef_diss2)
+    coef_diss2$Year <- year
+    coef_diss2$Model <- "Dissimilarity Index"
+    coef_data <- rbind(coef_data, coef_diss2[, c("Year", "Variable", "Estimate", "Model")])
+  }
+  
+  # Plot comparison of both models across years
+  p <- ggplot(coef_data, aes(x = Year, y = Estimate, color = Model, linetype = Model)) +
+    geom_line(size = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~Variable, scales = "free_y") +
+    labs(title = paste("Comparison of Coefficients for", nationality), 
+         x = "Year", y = "Coefficient Estimate", color = "Model") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  # Save the plot
+  ggsave(filename = paste0("Mutual_Regression_Comparison_Plots/Comparison_", nationality, ".png"), plot = p, width = 10, height = 8)
+}
+
+```
+
+## Question 4: How have housing conditions and settlement patterns mutually impacted each other over time?
+
+```{r}
+# Nationalities and their corresponding columns
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+dissimilarity_columns <- c("Dissimilarity_Index_Bangladesh", 
+                           "Dissimilarity_Index_Caribbean", 
+                           "Dissimilarity_Index_Poland", 
+                           "Dissimilarity_Index_Romania", 
+                           "Dissimilarity_Index_SEAfrica", 
+                           "Dissimilarity_Index_SouthAmerica")
+cumulative_dissimilarity_columns <- c("cumulative_dissimilarity_Bangladesh", 
+                                      "cumulative_dissimilarity_Caribbean", 
+                                      "cumulative_dissimilarity_Poland", 
+                                      "cumulative_dissimilarity_Romania", 
+                                      "cumulative_dissimilarity_SEAfrica", 
+                                      "cumulative_dissimilarity_SouthAmerica")
+
+# Key years for analysis
+key_years <- c(2001, 2005, 2011, 2015, 2021)
+
+# Loop over all nationalities for Model 1 and Model 2 for each key year
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- dissimilarity_columns[i]
+  cum_diss_col <- cumulative_dissimilarity_columns[i]
+  
+  coef_data <- data.frame(Year = integer(), Variable = character(), Estimate = numeric(), Model = character())
+  
+  for (year in key_years) {
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # Model 1: Housing Index as Dependent Variable
+    model_housing <- lm(as.formula(paste0("HousingIndex ~ ", diss_col, " + ", cum_diss_col, 
+                                          " + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                        data = data_year)
+    
+    # Store coefficients for plotting
+    coef_housing <- as.data.frame(summary(model_housing)$coefficients)
+    coef_housing$Variable <- rownames(coef_housing)
+    coef_housing$Year <- year
+    coef_housing$Model <- "Housing Index"
+    coef_data <- rbind(coef_data, coef_housing[, c("Year", "Variable", "Estimate", "Model")])
+    
+    # Model 2: Dissimilarity Index as Dependent Variable
+    model_diss2 <- lm(as.formula(paste0(diss_col, " ~ ", cum_diss_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                      data = data_year)
+    
+    # Store coefficients for plotting
+    coef_diss2 <- as.data.frame(summary(model_diss2)$coefficients)
+    coef_diss2$Variable <- rownames(coef_diss2)
+    coef_diss2$Year <- year
+    coef_diss2$Model <- "Dissimilarity Index"
+    coef_data <- rbind(coef_data, coef_diss2[, c("Year", "Variable", "Estimate", "Model")])
+  }
+  
+  # Plot comparison of both models across years
+  p <- ggplot(coef_data, aes(x = Year, y = Estimate, color = Model, linetype = Model)) +
+    geom_line(size = 1) +
+    geom_point(size = 2) +
+    facet_wrap(~Variable, scales = "free_y") +
+    labs(title = paste("Comparison of Coefficients for", nationality), 
+         x = "Year", y = "Coefficient Estimate", color = "Model") +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+  
+  # Save the plot
+  ggsave(filename = paste0("Mutual_Regression_Comparison_Plots/Comparison_", nationality, ".png"), plot = p, width = 10, height = 8)
+}
+
+```
+
+```{r}
+# CCF with mutual lag analysis
+for (nationality in nationalities) {
+  for (year in key_years) {
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # Calculate the CCF between Housing Index and Dissimilarity Index
+    ccf_result <- ccf(data_year$HousingIndex, data_year[[dissimilarity_columns[nationalities == nationality]]], plot = FALSE)
+    
+    # Plot the CCF results
+    plot(ccf_result, main = paste("CCF: Housing Index and", nationality, "Dissimilarity Index in", year))
+    
+    # Save the plot
+    ggsave(filename = paste0("CCF_Plots/CCF_Housing_", nationality, "_", year, "_q4.png"))
+  }
+}
+```
+
+```{r}
+# Nationalities and their corresponding columns
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+dissimilarity_columns <- c("Dissimilarity_Index_Bangladesh", 
+                           "Dissimilarity_Index_Caribbean", 
+                           "Dissimilarity_Index_Poland", 
+                           "Dissimilarity_Index_Romania", 
+                           "Dissimilarity_Index_SEAfrica", 
+                           "Dissimilarity_Index_SouthAmerica")
+
+# Key years for analysis
+key_years <- c(2001, 2005, 2011, 2015, 2021)
+
+# Create the main folder structure
+dir.create("GWR_4", showWarnings = FALSE)
+dir.create("GWR_4/General_Results", showWarnings = FALSE)
+dir.create("GWR_4/Annual_Results", showWarnings = FALSE)
+dir.create("GWR_4/General_Plots", showWarnings = FALSE)
+dir.create("GWR_4/Annual_Plots", showWarnings = FALSE)
+
+# Loop through each nationality
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- dissimilarity_columns[i]
+  
+  # Run General GWR (all years combined)
+  coords_all <- st_coordinates(st_centroid(final_data_sf_sf$geometry))
+  
+  # General Model 1: Housing Index as dependent variable
+  formula_gwr_housing_general <- as.formula(paste0("HousingIndex ~ ", diss_col, " + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                                   paste(names(final_data_sf_sf)[grep("^Religion_", names(final_data_sf_sf))], collapse = " + ")))
+  
+  gwr_result_housing_general <- gwr(formula_gwr_housing_general, data = final_data_sf_sf, coords = coords_all, adapt = 0.05)
+  results_df_housing_general <- as.data.frame(gwr_result_housing_general$SDF)
+  write.csv(results_df_housing_general, file = paste0("GWR_4/General_Results/GWR_HousingIndex_", nationality, "_General.csv"), row.names = FALSE)
+  
+  # General Model 2: Dissimilarity Index as dependent variable
+  formula_gwr_diss_general <- as.formula(paste0(diss_col, " ~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                                paste(names(final_data_sf_sf)[grep("^Religion_", names(final_data_sf_sf))], collapse = " + ")))
+  
+  gwr_result_diss_general <- gwr(formula_gwr_diss_general, data = final_data_sf_sf, coords = coords_all, adapt = 0.05)
+  results_df_diss_general <- as.data.frame(gwr_result_diss_general$SDF)
+  write.csv(results_df_diss_general, file = paste0("GWR_4/General_Results/GWR_Dissimilarity_", nationality, "_General.csv"), row.names = FALSE)
+  
+  # General Plotting
+  p_housing_general <- ggplot(results_df_housing_general, aes(x = coords_all[,1], y = coords_all[,2], color = !!sym(diss_col))) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_minimal() +
+    labs(title = paste("General GWR Coefficient for", diss_col, "impact on Housing Index (", nationality, ")", sep = ""),
+         color = "Coefficient")
+  ggsave(filename = paste0("GWR_4/General_Plots/GWR_HousingIndex_Impact_", nationality, "_General.png"), plot = p_housing_general, width = 8, height = 6)
+  
+  p_diss_general <- ggplot(results_df_diss_general, aes(x = coords_all[,1], y = coords_all[,2], color = HousingIndex)) +
+    geom_point() +
+    scale_color_viridis_c() +
+    theme_minimal() +
+    labs(title = paste("General GWR Coefficient for Housing Index impact on", diss_col, "(", nationality, ")", sep = ""),
+         color = "Coefficient")
+  ggsave(filename = paste0("GWR_4/General_Plots/GWR_Dissimilarity_Impact_", nationality, "_General.png"), plot = p_diss_general, width = 8, height = 6)
+  
+  # Loop through each year for annual GWR
+  for (year in key_years) {
+    # Subset data for the specific year
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # Calculate coordinates based on the subsetted data
+    coords_year <- st_coordinates(st_centroid(data_year$geometry))
+    
+    # Check if data and coords match
+    if (nrow(data_year) == nrow(coords_year)) {
+      
+      # Annual Model 1: Housing Index as dependent variable
+      formula_gwr_housing <- as.formula(paste0("HousingIndex ~ ", diss_col, " + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                               paste(names(data_year)[grep("^Religion_", names(data_year))], collapse = " + ")))
+      
+      gwr_result_housing <- gwr(formula_gwr_housing, data = data_year, coords = coords_year, adapt = 0.05)
+      results_df_housing <- as.data.frame(gwr_result_housing$SDF)
+      write.csv(results_df_housing, file = paste0("GWR_4/Annual_Results/GWR_HousingIndex_", nationality, "_", year, "_Mutual.csv"), row.names = FALSE)
+      
+      # Annual Model 2: Dissimilarity Index as dependent variable
+      formula_gwr_diss <- as.formula(paste0(diss_col, " ~ HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + ",
+                                            paste(names(data_year)[grep("^Religion_", names(data_year))], collapse = " + ")))
+      
+      gwr_result_diss <- gwr(formula_gwr_diss, data = data_year, coords = coords_year, adapt = 0.05)
+      results_df_diss <- as.data.frame(gwr_result_diss$SDF)
+      write.csv(results_df_diss, file = paste0("GWR_4/Annual_Results/GWR_Dissimilarity_", nationality, "_", year, "_Mutual.csv"), row.names = FALSE)
+      
+      # Annual Plotting
+      p_housing <- ggplot(results_df_housing, aes(x = coords_year[,1], y = coords_year[,2], color = !!sym(diss_col))) +
+        geom_point() +
+        scale_color_viridis_c() +
+        theme_minimal() +
+        labs(title = paste("GWR Coefficient for", diss_col, "impact on Housing Index (", nationality, " - ", year, ")", sep = ""),
+             color = "Coefficient")
+      ggsave(filename = paste0("GWR_4/Annual_Plots/GWR_HousingIndex_Impact_", nationality, "_", year, ".png"), plot = p_housing, width = 8, height = 6)
+      
+      p_diss <- ggplot(results_df_diss, aes(x = coords_year[,1], y = coords_year[,2], color = HousingIndex)) +
+        geom_point() +
+        scale_color_viridis_c() +
+        theme_minimal() +
+        labs(title = paste("GWR Coefficient for Housing Index impact on", diss_col, "(", nationality, " - ", year, ")", sep = ""),
+             color = "Coefficient")
+      ggsave(filename = paste0("GWR_4/Annual_Plots/GWR_Dissimilarity_Impact_", nationality, "_", year, ".png"), plot = p_diss, width = 8, height = 6)
+      
+    } else {
+      cat("Data and coords do not match for year:", year, "and nationality:", nationality, "\n")
+    }
+  }
+}
+
+```
+
+## Question 5: Predictive Analysis of Dissimilarity Index
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(spgwr)
+library(viridis)
+library(dplyr)
+
+# Define the years of interest
+years <- c(2001, 2005, 2011, 2015, 2021)
+
+# Define the nationalities and corresponding columns for Dissimilarity Index and Cumulative Dissimilarity Index
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+diss_columns <- c("Dissimilarity_Index_Bangladesh", "Dissimilarity_Index_Caribbean", 
+                  "Dissimilarity_Index_Poland", "Dissimilarity_Index_Romania", 
+                  "Dissimilarity_Index_SEAfrica", "Dissimilarity_Index_SouthAmerica")
+cumulative_columns <- c("cumulative_dissimilarity_Bangladesh", "cumulative_dissimilarity_Caribbean", 
+                        "cumulative_dissimilarity_Poland", "cumulative_dissimilarity_Romania", 
+                        "cumulative_dissimilarity_SEAfrica", "cumulative_dissimilarity_SouthAmerica")
+
+# Ensure directories exist to save results
+if (!dir.exists("Predictive_Results")) dir.create("Predictive_Results")
+if (!dir.exists("Predictive_Plots")) dir.create("Predictive_Plots")
+
+# Loop through each nationality for analysis
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- diss_columns[i]
+  cumulative_col <- cumulative_columns[i]
+  
+  # Train-test split
+  set.seed(123)
+  train_index <- sample(seq_len(nrow(final_data_sf_sf)), size = 0.7 * nrow(final_data_sf_sf))
+  train_data <- final_data_sf_sf[train_index, ]
+  test_data <- final_data_sf_sf[-train_index, ]
+  
+  # Predictive Model for Dissimilarity Index
+  model_diss_predict <- lm(as.formula(paste0(diss_col, " ~ ", cumulative_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                           data = train_data)
+  print(summary(model_diss_predict))
+
+  # Prediction on test data
+  predicted_diss <- predict(model_diss_predict, newdata = test_data)
+  
+  # Compare predictions with actual values
+  results <- data.frame(Actual = test_data[[diss_col]], Predicted = predicted_diss)
+  print(head(results))
+  
+  # Plot predictions vs actual values
+  ggplot(results, aes(x = Actual, y = Predicted)) +
+    geom_point() +
+    geom_abline(slope = 1, intercept = 0, color = "red") +
+    labs(title = paste0("Predicted vs Actual Dissimilarity Index - ", nationality), x = "Actual Diss", y = "Predicted Diss")
+
+  # Save the plot
+  ggsave(filename = paste0("Predictive_Plots/Predicted_vs_Actual_Diss_", nationality, ".png"), width = 8, height = 6)
+  
+  # Baseline Prediction on full dataset
+  baseline_predicted_diss <- predict(model_diss_predict, newdata = final_data_sf_sf)
+
+  # Scenario: Optimistic (Improved Housing Conditions, Reduced Crime, Increased Greenery, Improved PTAL)
+  optimistic_scenario <- final_data_sf_sf
+  optimistic_scenario$HousingIndex <- optimistic_scenario$HousingIndex * 1.1
+  optimistic_scenario$MSOA_crime <- optimistic_scenario$MSOA_crime * 0.9
+  optimistic_scenario$MSOA_percent_green <- optimistic_scenario$MSOA_percent_green * 1.2
+  optimistic_scenario$PTAL <- optimistic_scenario$PTAL * 1.1
+  optimistic_predicted_diss <- predict(model_diss_predict, newdata = optimistic_scenario)
+
+  # Scenario: Pessimistic (Worsened Housing Conditions, Increased Crime, Reduced Greenery, Worsened PTAL)
+  pessimistic_scenario <- final_data_sf_sf
+  pessimistic_scenario$HousingIndex <- pessimistic_scenario$HousingIndex * 0.9
+  pessimistic_scenario$MSOA_crime <- pessimistic_scenario$MSOA_crime * 1.2
+  pessimistic_scenario$MSOA_percent_green <- pessimistic_scenario$MSOA_percent_green * 0.8
+  pessimistic_scenario$PTAL <- pessimistic_scenario$PTAL * 0.9
+  pessimistic_predicted_diss <- predict(model_diss_predict, newdata = pessimistic_scenario)
+
+  # Scenario: High Initial Dissimilarity (Increase current dissimilarity by 10%)
+  high_diss_scenario <- final_data_sf_sf
+  high_diss_scenario[[diss_col]] <- high_diss_scenario[[diss_col]] * 1.1
+  high_diss_predicted_diss <- predict(model_diss_predict, newdata = high_diss_scenario)
+
+  # Scenario: Low Initial Dissimilarity (Reduce current dissimilarity by 10%)
+  low_diss_scenario <- final_data_sf_sf
+  low_diss_scenario[[diss_col]] <- low_diss_scenario[[diss_col]] * 0.9
+  low_diss_predicted_diss <- predict(model_diss_predict, newdata = low_diss_scenario)
+
+  # Compare Scenarios
+  scenario_results <- data.frame(
+    MSOA = final_data_sf_sf$MSOA11CD,  # Ensure the correct MSOA column is used
+    Baseline_Diss = baseline_predicted_diss,
+    Optimistic_Diss = optimistic_predicted_diss,
+    Pessimistic_Diss = pessimistic_predicted_diss,
+    High_Initial_Diss = high_diss_predicted_diss,
+    Low_Initial_Diss = low_diss_predicted_diss
+  )
+  print(head(scenario_results))
+  
+  # Plot scenarios
+  ggplot(scenario_results, aes(x = MSOA)) +
+    geom_line(aes(y = Baseline_Diss, color = "Baseline")) +
+    geom_line(aes(y = Optimistic_Diss, color = "Optimistic")) +
+    geom_line(aes(y = Pessimistic_Diss, color = "Pessimistic")) +
+    geom_line(aes(y = High_Initial_Diss, color = "High Initial Diss")) +
+    geom_line(aes(y = Low_Initial_Diss, color = "Low Initial Diss")) +
+    labs(title = paste0("Predicted Dissimilarity Index under Different Scenarios - ", nationality), x = "MSOA", y = "Predicted Diss") +
+    scale_color_manual(values = c("Baseline" = "blue", "Optimistic" = "green", "Pessimistic" = "red", "High Initial Diss" = "orange", "Low Initial Diss" = "purple"))
+
+  # Save the plot
+  ggsave(filename = paste0("Predictive_Plots/Scenario_Diss_", nationality, ".png"), width = 10, height = 6)
+  
+  # Annual Predictive Analysis
+  for (y in years) {
+    cat("Running Predictive Analysis for year:", y, " and nationality: ", nationality, "\n")
+    
+    annual_data <- subset(final_data_sf_sf, Year == y)
+    
+    # Annual Predictive Model
+    model_diss_predict_annual <- lm(as.formula(paste0(diss_col, " ~ ", cumulative_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                                    data = annual_data)
+    print(summary(model_diss_predict_annual))
+
+    # Annual Prediction on same data
+    predicted_diss_annual <- predict(model_diss_predict_annual, newdata = annual_data)
+    
+    # Compare predictions with actual values
+    results_annual <- data.frame(Actual = annual_data[[diss_col]], Predicted = predicted_diss_annual)
+    print(head(results_annual))
+    
+    # Plot predictions vs actual values
+    ggplot(results_annual, aes(x = Actual, y = Predicted)) +
+      geom_point() +
+      geom_abline(slope = 1, intercept = 0, color = "red") +
+      labs(title = paste0("Annual Predicted vs Actual Diss - ", nationality, " (", y, ")"), x = "Actual Diss", y = "Predicted Diss")
+    
+    # Save the plot
+    ggsave(filename = paste0("Predictive_Plots/Annual_Predicted_vs_Actual_Diss_", nationality, "_", y, ".png"), width = 8, height = 6)
+  }
+}
+```
+```{r}
+par(mfrow = c(2, 2))
+plot(model_diss_predict)
+```
+
+```{r}
+# Diagnostic plots for the annual model
+par(mfrow = c(2, 2))  
+plot(model_diss_predict_annual)  
+```
+
+```{r}
+# Load necessary libraries
+library(ggplot2)
+library(spgwr)
+library(viridis)
+library(dplyr)
+library(caret)
+
+# Define the years of interest
+years <- c(2001, 2005, 2011, 2015, 2021)
+
+# Define the nationalities and corresponding columns for Dissimilarity Index and Cumulative Dissimilarity Index
+nationalities <- c("Bangladesh", "Caribbean", "Poland", "Romania", "SEAfrica", "SouthAmerica")
+diss_columns <- c("Dissimilarity_Index_Bangladesh", "Dissimilarity_Index_Caribbean", 
+                  "Dissimilarity_Index_Poland", "Dissimilarity_Index_Romania", 
+                  "Dissimilarity_Index_SEAfrica", "Dissimilarity_Index_SouthAmerica")
+cumulative_columns <- c("cumulative_dissimilarity_Bangladesh", "cumulative_dissimilarity_Caribbean", 
+                        "cumulative_dissimilarity_Poland", "cumulative_dissimilarity_Romania", 
+                        "cumulative_dissimilarity_SEAfrica", "cumulative_dissimilarity_SouthAmerica")
+
+# Ensure directories exist to save results
+if (!dir.exists("Validation_Results")) dir.create("Validation_Results")
+if (!dir.exists("Validation_Plots")) dir.create("Validation_Plots")
+
+# Loop through each nationality and year for analysis
+for (i in seq_along(nationalities)) {
+  nationality <- nationalities[i]
+  diss_col <- diss_columns[i]
+  cumulative_col <- cumulative_columns[i]
+
+  for (year in years) {
+    # Subset data for the specific year
+    data_year <- subset(final_data_sf_sf, Year == year)
+    
+    # 1. Weighted Least Squares (WLS) for Heteroscedasticity
+    abs_residuals <- abs(resid(lm(as.formula(paste0(diss_col, " ~ ", cumulative_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), data = data_year)))
+    weights <- 1 / (abs_residuals^2)
+    
+    wls_model <- lm(as.formula(paste0(diss_col, " ~ ", cumulative_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                    data = data_year, weights = weights)
+    print(summary(wls_model))
+    
+    # Save WLS diagnostic plots
+    png(paste0("Validation_Plots/WLS_Diagnostics_", nationality, "_", year, ".png"))
+    par(mfrow = c(2, 2))
+    plot(wls_model)
+    dev.off()
+
+    # 2. Polynomial Regression for Non-linearity
+    poly_model <- lm(as.formula(paste0(diss_col, " ~ poly(HousingIndex, 2) + poly(MSOA_crime, 2) + poly(MSOA_percent_green, 2) + poly(PTAL, 2) + 
+                                         Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                     data = data_year)
+    print(summary(poly_model))
+
+    # Save polynomial regression diagnostic plots
+    png(paste0("Validation_Plots/Poly_Diagnostics_", nationality, "_", year, ".png"))
+    par(mfrow = c(2, 2))
+    plot(poly_model)
+    dev.off()
+    
+    # 3. Log-Transformation of Dissimilarity Index
+    log_model <- lm(as.formula(paste0("log(", diss_col, ") ~ ", cumulative_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                data = data_year)
+    print(summary(log_model))
+    
+    # Save log-transformed model diagnostic plots
+    png(paste0("Validation_Plots/Log_Diagnostics_", nationality, "_", year, ".png"))
+    par(mfrow = c(2, 2))
+    plot(log_model)
+    dev.off()
+
+    # 4. Cross-Validation for Model Validation
+    train_control <- trainControl(method = "cv", number = 10)
+    cv_model <- train(as.formula(paste0(diss_col, " ~ ", cumulative_col, " + HousingIndex + MSOA_crime + MSOA_percent_green + PTAL + 
+                                     Religion_Christian + Religion_Hindu + Religion_Jewish + Religion_Muslim + Religion_NoReligion + Religion_Sikh")), 
+                  data = data_year, method = "lm", trControl = train_control)
+    # Save the cross-validation results
+    saveRDS(cv_model, file = paste0("Validation_Results/CV_Model_", nationality, "_", year, ".rds"))
+    
+    # Print summary of cross-validation results
+    print(cv_model)
+  }
+}
+
+```
+
+
